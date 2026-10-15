@@ -1,0 +1,105 @@
+# Superconductivity benchmark: materials with MEASURED Tc, used to check the Tc models after any change.
+# Tc values: 3DSC (SuperCon) entries closest to the pure compound, retrieved 2026-10-08.
+# Structures: Materials Project ids, except where the lowest-energy MP phase is NOT the superconducting
+# polymorph (Ta, NbN) or not the ordinary phase (Ag): those are built from standard prototypes.
+# Training overlap (checked 2026-10-08 with pymatgen StructureMatcher against each model's dataset and split):
+# seen_* = "train" means the model was trained on this exact crystal, so its score there measures memory, not prediction.
+# Run: scientist benchmark
+
+[[material]]
+name = "MgB2"
+seen_alignn = "test (DFT 8.5 K)"
+seen_betenet = "train"
+mp_id = "mp-763"
+tc_measured_k = 37.80
+blind_spot = true      # two-gap superconductor: all tested models predict 1-7 K
+
+[[material]]
+name = "V3Si"
+seen_alignn = "no"
+seen_betenet = "no"
+mp_id = "mp-2567"
+tc_measured_k = 16.48
+
+[[material]]
+name = "Nb3Sn"
+seen_alignn = "train (DFT 15.3 K)"
+seen_betenet = "no"
+mp_id = "mp-1326"
+tc_measured_k = 16.71
+
+[[material]]
+name = "NbN"
+seen_alignn = "no"
+seen_betenet = "no"
+prototype = "rocksalt"   # cubic delta-NbN; MP's lowest phase (hexagonal mp-2634) is not the 17 K superconductor
+formula = "NbN"
+a = 4.39
+tc_measured_k = 17.30
+
+[[material]]
+name = "NbC"
+seen_alignn = "train (DFT 13.7 K)"
+seen_betenet = "train"
+mp_id = "mp-910"
+tc_measured_k = 10.03
+
+[[material]]
+name = "Nb"
+seen_alignn = "unknown: in dataset, not in split (DFT 13.8 K)"
+seen_betenet = "train"
+mp_id = "mp-75"
+tc_measured_k = 9.00
+
+[[material]]
+name = "Pb"
+seen_alignn = "unknown: in dataset, not in split (DFT 5.5 K)"
+seen_betenet = "train"
+mp_id = "mp-20483"
+tc_measured_k = 6.47
+
+[[material]]
+name = "Ta"
+seen_alignn = "unknown: in dataset, not in split (DFT 10.2 K)"
+seen_betenet = "test"
+prototype = "bcc"        # alpha-Ta; MP's lowest phase is beta-Ta (30 atoms), which superconducts far lower
+formula = "Ta"
+a = 3.306
+tc_measured_k = 4.38
+
+[[material]]
+name = "Al"
+seen_alignn = "no"
+seen_betenet = "train"
+mp_id = "mp-134"
+tc_measured_k = 1.25
+
+[[material]]
+name = "Cu"
+seen_alignn = "no"
+seen_betenet = "no"
+mp_id = "mp-30"
+tc_measured_k = 0.0
+
+[[material]]
+name = "Ag"
+seen_alignn = "no"
+seen_betenet = "no"
+prototype = "fcc"
+formula = "Ag"
+a = 4.086
+tc_measured_k = 0.0
+
+[[material]]
+name = "Au"
+seen_alignn = "no"
+seen_betenet = "no"
+mp_id = "mp-81"
+tc_measured_k = 0.0
+
+[baseline]               # measured on this machine 2026-10-08
+alignn_yes_no = 12        # correct "is it a superconductor" calls at 1 K, out of 12
+betenet_yes_no = 11
+alignn_mae_k = 2.4        # mean |predicted - measured|, blind spots excluded
+betenet_mae_k = 4.5
+verdicts_consistent = 12  # superconductors not labelled "unlikely", non-superconductors labelled "unlikely"

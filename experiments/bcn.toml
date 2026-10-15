@@ -1,0 +1,22 @@
+# Bounded benchmark from the plan (section 32): generate B-C-N structures, filter, evaluate.
+name = "bcn"
+
+[objective]
+description = """
+Find low-energy crystal structures in the boron-carbon-nitrogen system. Generate candidates
+with MatterGen, filter them structurally, relax them with MatterSim, cross-check promising ones
+with MACE, and rank them by energy above this experiment's convex hull.
+"""
+
+[constraints]
+elements = ["B", "C", "N"]
+max_sites = 40
+
+[budget]
+mattergen_structures = 32     # ~30-55 s each on this GPU
+relaxations = 150
+single_points = 300
+planner_calls = 150
+
+[planner]
+autonomy = 1

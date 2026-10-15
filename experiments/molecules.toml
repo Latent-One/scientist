@@ -1,0 +1,18 @@
+# The molecule path: ChemFM proposes SMILES, RDKit validates and describes them.
+name = "molecules"
+
+[objective]
+description = """
+Explore what ChemFM-1B generates: validity, diversity, and descriptor distributions
+(molecular weight, LogP, polar surface area). Learn SMILES and molecular descriptors.
+"""
+
+[constraints]
+elements = []      # no element restriction
+
+[budget]
+chemfm_molecules = 2000
+planner_calls = 60
+
+[planner]
+autonomy = 1

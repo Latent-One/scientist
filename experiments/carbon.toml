@@ -1,0 +1,23 @@
+# A first experiment for learning the instrument: one element, known answers.
+# Diamond and graphite are both carbon; which does each model think is lower in energy?
+name = "carbon"
+
+[objective]
+description = """
+Learn the instrument on pure carbon: build carbon nanotubes and graphene-derived structures,
+relax them with MatterSim and MACE, compare energies and lattice constants against
+known values, and see where the two models disagree.
+"""
+
+[constraints]
+elements = ["C"]
+max_sites = 32
+
+[budget]
+mattergen_structures = 8
+relaxations = 100
+single_points = 200
+planner_calls = 100
+
+[planner]
+autonomy = 1   # planner proposes, you approve every tool run

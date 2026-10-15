@@ -1,0 +1,86 @@
+# Machine configuration. Copy to scientist.toml and edit the paths for your machine.
+# Paths may start with ~/. Experiment intent (objective, elements, budget) lives in experiments/*.toml.
+# The values below are the tested DGX Spark (GB10, 128 GB unified memory) setup.
+
+data_dir = "~/scientist-data"
+
+[planner]
+url = "http://127.0.0.1:8000"     # vLLM container "planner" (Qwen3.6-35B-A3B)
+model = "planner"
+thinking = false                   # measured: same accuracy, ~4x slower with thinking on
+max_tokens = 2048
+recent_events = 25                 # how much history the planner sees each step
+max_steps_per_turn = 6             # actions the planner may take per message from you
+
+[gpu]
+# The planner holds ~78 GiB (64.69 weights + 13.96 KV cache, measured). Workers share this.
+budget_mb = 24000
+
+[workers.structure]                # pymatgen + ASE, CPU only
+python = "~/scientist-spike/env-mattersim/bin/python"
+script = "workers/structure_worker.py"
+timeout_s = 300
+
+[workers.mattersim]
+python = "~/scientist-spike/env-mattersim/bin/python"
+script = "workers/potential_worker.py"
+args = ["--model", "mattersim"]
+gpu = true
+est_gpu_mb = 600
+timeout_s = 3600
+
+[workers.mace]
+python = "~/scientist-spike/env-mace/bin/python"
+script = "workers/potential_worker.py"
+args = ["--model", "mace", "--dtype", "float64"]
+gpu = true
+est_gpu_mb = 1200
+timeout_s = 3600
+
+[workers.mattergen]
+python = "~/scientist-spike/env-mattergen/bin/python"
+script = "workers/mattergen_worker.py"
+gpu = true
+est_gpu_mb = 8000                  # measured 0.8 GB at batch 2; larger batches use more
+timeout_s = 14400
+
+[workers.mp]                       # Materials Project database lookups (network, CPU). Key: ~/.config/scientist/mp_api_key
+python = "~/scientist-spike/env-mattersim/bin/python"
+script = "workers/mp_worker.py"
+timeout_s = 300
+
+[workers.search]                   # literature: OpenAlex + arXiv in parallel (network, CPU, no key)
+python = "~/scientist-spike/env-mattersim/bin/python"
+script = "workers/search_worker.py"
+timeout_s = 60
+
+[workers.supercon_alignn]          # ALIGNN 2.0 Alexandria Tc / lambda / omega_log (validated 2026-10-08)
+python = "~/scientist-spike/env-alignn/bin/python"
+script = "workers/supercon_worker.py"
+args = ["--model", "alignn"]
+gpu = true
+est_gpu_mb = 300
+timeout_s = 900
+
+[workers.supercon_betenet]         # BETE-NET CSO ensemble x100: a2F(w) -> lambda, omega_log, Tc (validated 2026-10-08)
+python = "~/scientist-spike/env-betenet/bin/python"
+script = "workers/supercon_worker.py"
+args = ["--model", "betenet"]
+gpu = true
+est_gpu_mb = 2500                  # measured 1960 MB with all 100 models resident
+timeout_s = 900
+
+[workers.chem]                     # ChemFM-1B (GPU) + RDKit (CPU)
+python = "~/scientist-spike/env-chem/bin/python"
+script = "workers/chem_worker.py"
+gpu = true
+est_gpu_mb = 4000
+timeout_s = 3600
+
+[supercon]
+# Labels for ML-estimated Tc (both models are surrogates of DFT, not measurements).
+likely_tc_k = 5.0          # "likely": both models >= this AND BETE-NET mean-1σ >= possible_tc_k
+possible_tc_k = 1.0        # "possible": at least one model >= this
+record_tc_k = 39.0         # MgB2, best conventional superconductor at ambient pressure
+training_max_tc_k = 33.0   # highest DFT Tc in the models' training/test data: above this = extrapolation
+data_3dsc = "~/scientist-data/datasets/3DSC_MP.csv"   # measured Tc (SuperCon) matched to MP structures

@@ -617,7 +617,7 @@ pub fn dispatch(rt: &mut Runtime, cli: Cli) -> Result<()> {
         Cmd::Notebook { out } => {
             let e = exp()?;
             let events = rt.store.load_events(&e)?;
-            let st = ExperimentState::fold(&events);
+            let st = ExperimentState::fold(events.clone());
             let path = out.unwrap_or_else(|| rt.cfg.data_dir().join("notebooks").join(format!("{e}.md")));
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
@@ -669,7 +669,11 @@ fn fmtv(v: Option<f64>, scale: f64, prec: usize) -> String {
 
 fn status(rt: &Runtime, exp: &str) -> Result<()> {
     let events = rt.store.load_events(exp)?;
-    let st = ExperimentState::fold(&events);
+    let recent: Vec<String> = events[events.len().saturating_sub(6)..]
+        .iter()
+        .map(|r| format!("  {:>6} {} {:<8} {}", r.seq, clock(r.ts_ms), r.actor.as_str(), r.event.summary()))
+        .collect();
+    let st = ExperimentState::fold(events);
     let (b, u) = (&st.budget, &st.usage);
     println!("EXPERIMENT {}  [{:?}]  autonomy {} ({})", st.name, st.status, st.autonomy, level_text(st.autonomy));
     if let Some((p, at)) = &st.forked_from {
@@ -722,8 +726,8 @@ fn status(rt: &Runtime, exp: &str) -> Result<()> {
     let gpu_s: f64 = st.jobs.values().filter(|j| !j.cache_hit).map(|j| j.wall_s).sum();
     println!("JOBS       {jobs} completed ({cache} cache hits), {:.0} s of worker compute, {} failed", gpu_s, st.jobs.values().filter(|j| j.failure.is_some()).count());
     println!("RECENT");
-    for r in events.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
-        println!("  {:>6} {} {:<8} {}", r.seq, clock(r.ts_ms), r.actor.as_str(), r.event.summary());
+    for line in &recent {
+        println!("{line}");
     }
     Ok(())
 }
@@ -740,7 +744,7 @@ fn lattice_text(s: &Structure) -> String {
 
 fn inspect(rt: &Runtime, exp: &str, id: &str) -> Result<()> {
     let events = rt.store.load_events(exp)?;
-    let st = ExperimentState::fold(&events);
+    let st = ExperimentState::fold(events.clone());
     if id.starts_with("sha256:") {
         let bytes = rt.store.read_artifact(id)?;
         println!("artifact {id}\nfile {}\n{}", rt.store.artifact_file(id).display(), serde_json::to_string_pretty(&serde_json::from_slice::<Value>(&bytes)?)?);

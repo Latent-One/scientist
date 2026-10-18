@@ -24,6 +24,16 @@ pub enum Actor {
 }
 
 impl Actor {
+    pub fn parse(s: &str) -> Option<Actor> {
+        Some(match s {
+            "human" => Actor::Human,
+            "planner" => Actor::Planner,
+            "search" => Actor::Search,
+            "runtime" => Actor::Runtime,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Actor::Human => "human",

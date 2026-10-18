@@ -187,7 +187,8 @@ pub struct ExperimentState {
 }
 
 impl ExperimentState {
-    pub fn fold(records: &[EventRecord]) -> ExperimentState {
+    /// Folds by value: event payloads move into the state instead of being cloned.
+    pub fn fold(records: Vec<EventRecord>) -> ExperimentState {
         let mut s = ExperimentState {
             name: String::new(),
             objective: String::new(),
@@ -200,7 +201,7 @@ impl ExperimentState {
             candidates: vec![],
             index: HashMap::new(),
             by_artifact: HashMap::new(),
-            observations: vec![],
+            observations: Vec::with_capacity(records.len() / 4),
             hypotheses: vec![],
             notes: vec![],
             references: BTreeMap::new(),
@@ -218,62 +219,62 @@ impl ExperimentState {
         s
     }
 
-    fn apply(&mut self, r: &EventRecord) {
+    fn apply(&mut self, r: EventRecord) {
         self.last_seq = r.seq;
-        match &r.event {
+        match r.event {
             Event::ExperimentCreated { name, objective, elements, max_sites, budget, autonomy } => {
                 // A fork's own ExperimentCreated renames the state; everything else carries over.
-                self.name = name.clone();
-                self.objective = objective.clone();
-                self.elements = elements.clone();
-                self.max_sites = *max_sites;
-                self.budget = budget.clone();
-                self.autonomy = *autonomy;
+                self.name = name;
+                self.objective = objective;
+                self.elements = elements;
+                self.max_sites = max_sites;
+                self.budget = budget;
+                self.autonomy = autonomy;
             }
-            Event::ExperimentForked { parent, at_seq } => self.forked_from = Some((parent.clone(), *at_seq)),
-            Event::ObjectiveSet { text } => self.objective = text.clone(),
+            Event::ExperimentForked { parent, at_seq } => self.forked_from = Some((parent, at_seq)),
+            Event::ObjectiveSet { text } => self.objective = text,
             Event::ConstraintsSet { elements, max_sites } => {
-                self.elements = elements.clone();
-                self.max_sites = *max_sites;
+                self.elements = elements;
+                self.max_sites = max_sites;
             }
-            Event::BudgetSet { budget } => self.budget = budget.clone(),
-            Event::AutonomySet { level } => self.autonomy = *level,
+            Event::BudgetSet { budget } => self.budget = budget,
+            Event::AutonomySet { level } => self.autonomy = level,
             Event::StatusSet { status, reason } => {
-                self.status = *status;
-                self.status_reason = reason.clone();
+                self.status = status;
+                self.status_reason = reason;
             }
             Event::NoteAdded { text, refs } => {
-                self.notes.push(Note { seq: r.seq, author: r.actor, text: text.clone(), refs: refs.clone(), interpretation: false })
+                self.notes.push(Note { seq: r.seq, author: r.actor, text, refs, interpretation: false })
             }
             Event::InterpretationAdded { text, refs } => {
-                self.notes.push(Note { seq: r.seq, author: r.actor, text: text.clone(), refs: refs.clone(), interpretation: true })
+                self.notes.push(Note { seq: r.seq, author: r.actor, text, refs, interpretation: true })
             }
             Event::HypothesisProposed { id, statement, rationale, falsified_if } => {
-                self.ids.hypothesis = self.ids.hypothesis.max(num(id));
+                self.ids.hypothesis = self.ids.hypothesis.max(num(&id));
                 self.hypotheses.push(Hypothesis {
-                    id: id.clone(),
-                    statement: statement.clone(),
-                    rationale: rationale.clone(),
-                    falsified_if: falsified_if.clone(),
+                    id,
+                    statement,
+                    rationale,
+                    falsified_if,
                     status: HypothesisStatus::Open,
                     reason: String::new(),
                     author: r.actor,
                 });
             }
             Event::HypothesisUpdated { id, status, reason } => {
-                if let Some(h) = self.hypotheses.iter_mut().find(|h| &h.id == id) {
-                    h.status = *status;
-                    h.reason = reason.clone();
+                if let Some(h) = self.hypotheses.iter_mut().find(|h| h.id == id) {
+                    h.status = status;
+                    h.reason = reason;
                 }
             }
             Event::PlannerProposed { .. } => self.usage.planner_calls += 1,
             Event::JobQueued { job, worker, op, .. } => {
-                let n = num(job);
+                let n = num(&job);
                 self.ids.job = self.ids.job.max(n);
                 self.jobs.insert(n, JobInfo {
-                    id: job.clone(),
-                    worker: worker.clone(),
-                    op: op.clone(),
+                    id: job,
+                    worker,
+                    op,
                     state: JobState::Queued,
                     wall_s: 0.0,
                     items: 0,
@@ -282,19 +283,19 @@ impl ExperimentState {
                 });
             }
             Event::JobStarted { job, .. } => {
-                if let Some(j) = self.jobs.get_mut(&num(job)) {
+                if let Some(j) = self.jobs.get_mut(&num(&job)) {
                     j.state = JobState::Running;
                 }
             }
             Event::JobCompleted { job, wall_s, items, cache_hit, .. } => {
-                if let Some(j) = self.jobs.get_mut(&num(job)) {
+                if let Some(j) = self.jobs.get_mut(&num(&job)) {
                     j.state = JobState::Completed;
-                    j.wall_s = *wall_s;
-                    j.items = *items;
-                    j.cache_hit = *cache_hit;
+                    j.wall_s = wall_s;
+                    j.items = items;
+                    j.cache_hit = cache_hit;
                     if !cache_hit {
                         // Budget is consumed by compute, not by cache reuse.
-                        let n = *items as u64;
+                        let n = items as u64;
                         match (j.worker.as_str(), j.op.as_str()) {
                             ("mattergen", "generate") => self.usage.mattergen_structures += n,
                             ("chem", "chemfm_generate") => self.usage.chemfm_molecules += n,
@@ -306,63 +307,63 @@ impl ExperimentState {
                 }
             }
             Event::JobFailed { job, failure } => {
-                if let Some(j) = self.jobs.get_mut(&num(job)) {
+                if let Some(j) = self.jobs.get_mut(&num(&job)) {
                     j.state = if failure.kind == FailureKind::Cancelled { JobState::Cancelled } else { JobState::Failed };
-                    j.failure = Some(failure.clone());
+                    j.failure = Some(failure);
                 }
             }
             Event::JobUnknownAfterCrash { job } => {
-                if let Some(j) = self.jobs.get_mut(&num(job)) {
+                if let Some(j) = self.jobs.get_mut(&num(&job)) {
                     j.state = JobState::UnknownAfterCrash;
                 }
             }
             Event::CandidateAdded { id, artifact, kind, formula, origin, search, .. } => {
-                self.ids.candidate = self.ids.candidate.max(num(id));
+                self.ids.candidate = self.ids.candidate.max(num(&id));
                 self.index.insert(id.clone(), self.candidates.len());
                 self.by_artifact.entry(artifact.clone()).or_insert_with(|| id.clone());
                 self.candidates.push(Candidate {
-                    id: id.clone(),
-                    artifact: artifact.clone(),
-                    kind: *kind,
-                    formula: formula.clone(),
-                    origin: origin.clone(),
-                    search: search.clone(),
+                    id,
+                    artifact,
+                    kind,
+                    formula,
+                    origin,
+                    search,
                     status: CandidateStatus::Proposed,
                     status_reason: String::new(),
                     observations: vec![],
                 });
             }
             Event::ObservationRecorded { id, candidate, job, method, fidelity, input, output, properties, details } => {
-                self.ids.observation = self.ids.observation.max(num(id));
+                self.ids.observation = self.ids.observation.max(num(&id));
                 let idx = self.observations.len();
-                self.observations.push(Observation {
-                    id: id.clone(),
-                    candidate: candidate.clone(),
-                    job: job.clone(),
-                    method: method.clone(),
-                    fidelity: *fidelity,
-                    input: input.clone(),
-                    output: output.clone(),
-                    properties: properties.clone(),
-                    details: details.clone(),
-                });
-                if let Some(&ci) = self.index.get(candidate) {
+                if let Some(&ci) = self.index.get(&candidate) {
                     self.candidates[ci].observations.push(idx);
                 }
+                self.observations.push(Observation {
+                    id,
+                    candidate,
+                    job,
+                    method,
+                    fidelity,
+                    input,
+                    output,
+                    properties,
+                    details,
+                });
             }
             Event::CandidateStatusChanged { candidate, status, reason } => {
-                if let Some(&ci) = self.index.get(candidate) {
-                    self.candidates[ci].status = *status;
-                    self.candidates[ci].status_reason = reason.clone();
+                if let Some(&ci) = self.index.get(&candidate) {
+                    self.candidates[ci].status = status;
+                    self.candidates[ci].status_reason = reason;
                 }
             }
             Event::ReferenceSet { element, candidate, evaluator } => {
-                self.references.insert(element.clone(), (candidate.clone(), *evaluator));
+                self.references.insert(element, (candidate, evaluator));
             }
             Event::SearchDefined { spec } => {
                 self.ids.search = self.ids.search.max(num(&spec.id));
                 self.searches.insert(spec.id.clone(), SearchState {
-                    spec: spec.clone(),
+                    spec,
                     rounds_done: 0,
                     front: vec![],
                     rounds_without_improvement: 0,
@@ -370,20 +371,20 @@ impl ExperimentState {
                 });
             }
             Event::SearchRoundCompleted { search, round, front, improved, .. } => {
-                if let Some(s) = self.searches.get_mut(search) {
-                    s.rounds_done = *round;
-                    s.front = front.clone();
-                    s.rounds_without_improvement = if *improved { 0 } else { s.rounds_without_improvement + 1 };
+                if let Some(s) = self.searches.get_mut(&search) {
+                    s.rounds_done = round;
+                    s.front = front;
+                    s.rounds_without_improvement = if improved { 0 } else { s.rounds_without_improvement + 1 };
                 }
             }
             Event::SearchStopped { search, reason } => {
-                if let Some(s) = self.searches.get_mut(search) {
-                    s.stopped = Some(reason.clone());
+                if let Some(s) = self.searches.get_mut(&search) {
+                    s.stopped = Some(reason);
                 }
             }
             Event::PaperRecorded { id, source, source_id, title, year, venue, cited_by, url, artifact } => {
-                self.ids.paper = self.ids.paper.max(num(id));
-                self.papers.push(Paper { id: id.clone(), source: source.clone(), source_id: source_id.clone(), title: title.clone(), year: *year, venue: venue.clone(), cited_by: *cited_by, url: url.clone(), artifact: artifact.clone() });
+                self.ids.paper = self.ids.paper.max(num(&id));
+                self.papers.push(Paper { id, source, source_id, title, year, venue, cited_by, url, artifact: artifact });
             }
             Event::Interrupted { .. } => {}
             Event::UserMessage { .. }
@@ -442,5 +443,37 @@ impl ExperimentState {
             single_points: b.single_points.saturating_sub(u.single_points),
             planner_calls: b.planner_calls.saturating_sub(u.planner_calls),
         }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::store::Store;
+    use std::time::Instant;
+
+    /// Timing only, not a correctness test. Run with:
+    /// SCIENTIST_BENCH_DATA=<data dir> SCIENTIST_BENCH_EXP=<name> cargo test --release bench_load_fold -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_load_fold() {
+        let dir = std::env::var("SCIENTIST_BENCH_DATA").expect("SCIENTIST_BENCH_DATA");
+        let exp = std::env::var("SCIENTIST_BENCH_EXP").expect("SCIENTIST_BENCH_EXP");
+        let store = Store::open(std::path::Path::new(&dir)).unwrap();
+        let (mut load, mut fold) = (vec![], vec![]);
+        let mut n = 0;
+        for _ in 0..7 {
+            let t = Instant::now();
+            let ev = store.load_events(&exp).unwrap();
+            load.push(t.elapsed().as_secs_f64() * 1e3);
+            n = ev.len();
+            let t = Instant::now();
+            let st = ExperimentState::fold(ev);
+            fold.push(t.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(st);
+        }
+        load.sort_by(f64::total_cmp);
+        fold.sort_by(f64::total_cmp);
+        println!("events {n}: load median {:.2} ms, fold median {:.2} ms", load[3], fold[3]);
     }
 }

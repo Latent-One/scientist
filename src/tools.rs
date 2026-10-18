@@ -100,7 +100,7 @@ impl Runtime {
     }
 
     pub fn state(&self, exp: &str) -> Result<ExperimentState> {
-        Ok(ExperimentState::fold(&self.store.load_events(exp)?))
+        Ok(ExperimentState::fold(self.store.load_events(exp)?))
     }
 
     pub fn append(&mut self, exp: &str, actor: Actor, events: Vec<Event>) -> Result<()> {

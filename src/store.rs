@@ -128,15 +128,15 @@ impl Store {
             (Some(p), Some(at)) => self.load_events(&p)?.into_iter().filter(|e| e.seq <= at as u64).collect(),
             _ => vec![],
         };
-        let mut st = self.conn.prepare("SELECT seq, ts_ms, actor, payload FROM events WHERE experiment = ?1 ORDER BY seq")?;
-        let rows = st.query_map([experiment], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-        })?;
-        for row in rows {
-            let (seq, ts, actor, payload) = row?;
-            let event: Event = serde_json::from_str(&payload).with_context(|| format!("decoding event {seq}"))?;
-            let actor = serde_json::from_value(Value::String(actor))?;
-            out.push(EventRecord { seq: seq as u64, ts_ms: ts as u64, actor, event });
+        let mut st = self.conn.prepare_cached("SELECT seq, ts_ms, actor, payload FROM events WHERE experiment = ?1 ORDER BY seq")?;
+        let mut rows = st.query([experiment])?;
+        while let Some(r) = rows.next()? {
+            let seq = r.get::<_, i64>(0)? as u64;
+            // Decode straight from SQLite's row buffer: no intermediate String per column.
+            let payload = r.get_ref(3)?.as_bytes()?;
+            let event: Event = serde_json::from_slice(payload).with_context(|| format!("decoding event {seq}"))?;
+            let actor = Actor::parse(r.get_ref(2)?.as_str()?).ok_or_else(|| anyhow!("event {seq}: unknown actor"))?;
+            out.push(EventRecord { seq, ts_ms: r.get::<_, i64>(1)? as u64, actor, event });
         }
         Ok(out)
     }

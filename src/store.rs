@@ -18,6 +18,15 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Row (seq, ts_ms, actor, payload) -> EventRecord, decoded straight from SQLite's row buffer:
+/// no intermediate String per column.
+fn decode_row(r: &rusqlite::Row) -> Result<EventRecord> {
+    let seq = r.get::<_, i64>(0)? as u64;
+    let event: Event = serde_json::from_slice(r.get_ref(3)?.as_bytes()?).with_context(|| format!("decoding event {seq}"))?;
+    let actor = Actor::parse(r.get_ref(2)?.as_str()?).ok_or_else(|| anyhow!("event {seq}: unknown actor"))?;
+    Ok(EventRecord { seq, ts_ms: r.get::<_, i64>(1)? as u64, actor, event })
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -43,6 +52,8 @@ CREATE TABLE IF NOT EXISTS cache (
 CREATE TABLE IF NOT EXISTS worker_identity (
     worker TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, hello TEXT NOT NULL, updated_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS snapshots (
+    experiment TEXT PRIMARY KEY, seq INTEGER NOT NULL, fingerprint TEXT NOT NULL, payload BLOB NOT NULL);
 "#;
 
 pub struct Store {
@@ -131,14 +142,51 @@ impl Store {
         let mut st = self.conn.prepare_cached("SELECT seq, ts_ms, actor, payload FROM events WHERE experiment = ?1 ORDER BY seq")?;
         let mut rows = st.query([experiment])?;
         while let Some(r) = rows.next()? {
-            let seq = r.get::<_, i64>(0)? as u64;
-            // Decode straight from SQLite's row buffer: no intermediate String per column.
-            let payload = r.get_ref(3)?.as_bytes()?;
-            let event: Event = serde_json::from_slice(payload).with_context(|| format!("decoding event {seq}"))?;
-            let actor = Actor::parse(r.get_ref(2)?.as_str()?).ok_or_else(|| anyhow!("event {seq}: unknown actor"))?;
-            out.push(EventRecord { seq, ts_ms: r.get::<_, i64>(1)? as u64, actor, event });
+            out.push(decode_row(r)?);
         }
         Ok(out)
+    }
+
+    /// Events of this experiment itself with seq > `after`. Valid for resuming from a snapshot
+    /// taken at `after`: a fork's inherited parent events all precede its own first event.
+    pub fn load_events_after(&self, experiment: &str, after: u64) -> Result<Vec<EventRecord>> {
+        let mut st = self.conn.prepare_cached("SELECT seq, ts_ms, actor, payload FROM events WHERE experiment = ?1 AND seq > ?2 ORDER BY seq")?;
+        let mut rows = st.query(params![experiment, after as i64])?;
+        let mut out = vec![];
+        while let Some(r) = rows.next()? {
+            out.push(decode_row(r)?);
+        }
+        Ok(out)
+    }
+
+    /// The last `n` events of this experiment, oldest first.
+    pub fn recent_events(&self, experiment: &str, n: usize) -> Result<Vec<EventRecord>> {
+        let mut st = self.conn.prepare_cached("SELECT seq, ts_ms, actor, payload FROM events WHERE experiment = ?1 ORDER BY seq DESC LIMIT ?2")?;
+        let mut rows = st.query(params![experiment, n as i64])?;
+        let mut out = vec![];
+        while let Some(r) = rows.next()? {
+            out.push(decode_row(r)?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    // ---------- state snapshots (a cache: deleting them only costs a full fold) ----------
+
+    pub fn snapshot(&self, experiment: &str, fingerprint: u64) -> Result<Option<(u64, Vec<u8>)>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT seq, payload FROM snapshots WHERE experiment = ?1 AND fingerprint = ?2")?
+            .query_row(params![experiment, format!("{fingerprint:016x}")], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Vec<u8>>(1)?)))
+            .optional()?)
+    }
+
+    pub fn put_snapshot(&self, experiment: &str, seq: u64, fingerprint: u64, payload: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO snapshots (experiment, seq, fingerprint, payload) VALUES (?1, ?2, ?3, ?4)",
+            params![experiment, seq as i64, format!("{fingerprint:016x}"), payload],
+        )?;
+        Ok(())
     }
 
     // ---------- artifacts ----------
@@ -200,21 +248,19 @@ impl Store {
     // ---------- cache (shared across experiments) ----------
 
     pub fn cache_get(&self, key: &str) -> Result<Option<CacheEntry>> {
-        let row = self
-            .conn
-            .query_row("SELECT job, experiment, items, hello FROM cache WHERE key = ?1", [key], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-            })
-            .optional()?;
-        Ok(match row {
-            Some((job, experiment, items, hello)) => {
-                Some(CacheEntry { job, experiment, items: serde_json::from_str(&items)?, hello: serde_json::from_str(&hello)? })
-            }
-            None => None,
-        })
+        let mut st = self.conn.prepare_cached("SELECT job, experiment, items, hello FROM cache WHERE key = ?1")?;
+        let mut rows = st.query([key])?;
+        let Some(r) = rows.next()? else { return Ok(None) };
+        // items can be large (whole structures): decode from the row buffer, no String copy.
+        Ok(Some(CacheEntry {
+            job: r.get(0)?,
+            experiment: r.get(1)?,
+            items: serde_json::from_slice(r.get_ref(2)?.as_bytes()?)?,
+            hello: serde_json::from_slice(r.get_ref(3)?.as_bytes()?)?,
+        }))
     }
 
-    pub fn cache_put(&self, key: &str, worker: &str, op: &str, job: &str, experiment: &str, items: &[Value], hello: &Value) -> Result<()> {
+    pub fn cache_put<T: serde::Serialize>(&self, key: &str, worker: &str, op: &str, job: &str, experiment: &str, items: &[T], hello: &Value) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO cache (key, worker, op, job, experiment, items, hello, created_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![key, worker, op, job, experiment, serde_json::to_string(items)?, serde_json::to_string(hello)?, now_ms() as i64],

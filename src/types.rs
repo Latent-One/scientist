@@ -21,26 +21,55 @@ pub const ELEMENTS: [&str; 118] = [
 ];
 
 pub fn sha256(bytes: &[u8]) -> Hash {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    format!("sha256:{hex}")
+    // One allocation of the exact size; hex digits from a table instead of format! per byte.
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for b in digest {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 15) as usize] as char);
+    }
+    out
 }
 
 /// JSON with object keys sorted at every level. Cache keys and identity fingerprints hash
 /// this form, so they never depend on how a map happens to order its keys.
+/// Written straight into one buffer: no sorted copy of the tree is built.
 pub fn canonical_json(v: &serde_json::Value) -> String {
-    fn sort(v: &serde_json::Value) -> serde_json::Value {
+    fn write(v: &serde_json::Value, out: &mut Vec<u8>) {
         match v {
             serde_json::Value::Object(m) => {
-                let mut keys: Vec<&String> = m.keys().collect();
-                keys.sort();
-                serde_json::Value::Object(keys.into_iter().map(|k| (k.clone(), sort(&m[k]))).collect())
+                let mut entries: Vec<(&String, &serde_json::Value)> = m.iter().collect();
+                entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                out.push(b'{');
+                for (i, (k, val)) in entries.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(b',');
+                    }
+                    serde_json::to_writer(&mut *out, k).expect("string key");
+                    out.push(b':');
+                    write(val, out);
+                }
+                out.push(b'}');
             }
-            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sort).collect()),
-            other => other.clone(),
+            serde_json::Value::Array(a) => {
+                out.push(b'[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(b',');
+                    }
+                    write(x, out);
+                }
+                out.push(b']');
+            }
+            scalar => serde_json::to_writer(&mut *out, scalar).expect("scalar"),
         }
     }
-    sort(v).to_string()
+    let mut out = Vec::with_capacity(256);
+    write(v, &mut out);
+    // Only serde_json wrote string bytes, so the buffer is valid UTF-8.
+    String::from_utf8(out).expect("utf-8")
 }
 
 pub fn short(hash: &str) -> &str {
@@ -369,6 +398,39 @@ pub struct Objective {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The previous implementation (sorted copy of the tree, then to_string). Cache keys hash this
+    /// form, so the fast writer must produce identical bytes or every cache entry would miss.
+    fn canonical_json_reference(v: &serde_json::Value) -> String {
+        fn sort(v: &serde_json::Value) -> serde_json::Value {
+            match v {
+                serde_json::Value::Object(m) => {
+                    let mut keys: Vec<&String> = m.keys().collect();
+                    keys.sort();
+                    serde_json::Value::Object(keys.into_iter().map(|k| (k.clone(), sort(&m[k]))).collect())
+                }
+                serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sort).collect()),
+                other => other.clone(),
+            }
+        }
+        sort(v).to_string()
+    }
+
+    #[test]
+    fn canonical_json_matches_reference() {
+        let cases = [
+            serde_json::json!({"z": 1, "a": [3, {"y": "q\"\n\u{e9}", "b": null}], "m": {"k": 1.5e-9, "c": true, "b": -0.0}}),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!("plain"),
+            serde_json::json!({"worker": "mace", "op": "relax", "params": {"fmax": 0.01, "steps": 500}, "inputs": ["sha256:ab", "sha256:cd"], "identity": "sha256:ef"}),
+        ];
+        for c in &cases {
+            assert_eq!(canonical_json(c), canonical_json_reference(c));
+        }
+        let s = sha256(b"abc");
+        assert_eq!(s, "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
 
     #[test]
     fn canonical_is_order_and_noise_invariant() {

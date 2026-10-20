@@ -44,6 +44,8 @@ struct Running {
     load_s: f64,
 }
 
+/// Field order matches the cache's stored JSON ({"index","ok","output","error"}).
+#[derive(serde::Serialize)]
 pub struct ItemOut {
     pub index: usize,
     pub ok: bool,
@@ -174,13 +176,19 @@ impl WorkerPool {
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let msg = match line {
-                    Ok(l) => match serde_json::from_str::<Value>(&l) {
-                        Ok(v) => Line::Msg(v),
-                        Err(_) => Line::Bad(l),
-                    },
-                    Err(_) => break,
+            // One reused line buffer; items carrying structures can be large, so read in big chunks.
+            let mut rd = BufReader::with_capacity(1 << 16, stdout);
+            let mut buf = Vec::with_capacity(1 << 16);
+            loop {
+                buf.clear();
+                match rd.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
+                let msg = match serde_json::from_slice::<Value>(line) {
+                    Ok(v) => Line::Msg(v),
+                    Err(_) => Line::Bad(String::from_utf8_lossy(line).into_owned()),
                 };
                 if tx.send(msg).is_err() {
                     return;
@@ -232,13 +240,23 @@ impl WorkerPool {
         let timeout = Duration::from_secs(self.cfg.workers.get(name).map(|w| w.timeout_s).unwrap_or(3600));
         let t0 = Instant::now();
         let mut out = Outcome { items: vec![], wall_s: 0.0, gpu_mb: 0.0, failure: None };
-        let line = json!({"type": "request", "id": id, "op": op, "params": params, "inputs": inputs}).to_string();
+        // Serialized from borrows: the inputs (often whole structures) are never copied.
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            r#type: &'static str,
+            id: &'a str,
+            op: &'a str,
+            params: &'a Value,
+            inputs: &'a [Value],
+        }
+        let mut line = serde_json::to_vec(&Request { r#type: "request", id, op, params, inputs }).expect("request serializes");
+        line.push(b'\n');
         let Some(r) = self.running.get_mut(name) else {
             out.failure = Some(fail(FailureKind::WorkerCrashed, format!("{name} is not running"), None));
             return out;
         };
         r.requests += 1;
-        if let Err(e) = writeln!(r.stdin, "{line}").and_then(|_| r.stdin.flush()) {
+        if let Err(e) = r.stdin.write_all(&line).and_then(|_| r.stdin.flush()) {
             out.failure = Some(fail(FailureKind::WorkerCrashed, format!("writing to {name}: {e}"), None));
             self.running.remove(name);
             return out;
@@ -258,13 +276,13 @@ impl WorkerPool {
             match r.rx.recv_timeout(Duration::from_millis(200)) {
                 Err(RecvTimeoutError::Timeout) => continue,
                 Ok(Line::Bad(l)) => eprintln!("  [{name}] non-protocol output ignored: {}", &l[..l.len().min(120)]),
-                Ok(Line::Msg(v)) => match v["type"].as_str() {
+                Ok(Line::Msg(mut v)) => match v["type"].as_str() {
                     Some("progress") => progress(&v),
                     Some("item") => out.items.push(ItemOut {
                         index: v["index"].as_u64().unwrap_or(0) as usize,
                         ok: v["ok"].as_bool().unwrap_or(false),
-                        output: v["output"].clone(),
-                        error: v["error"].clone(),
+                        output: v["output"].take(),
+                        error: v["error"].take(),
                     }),
                     Some("done") => {
                         out.wall_s = v["wall_s"].as_f64().unwrap_or(t0.elapsed().as_secs_f64());

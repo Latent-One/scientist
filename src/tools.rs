@@ -13,7 +13,7 @@
 
 use crate::config::Config;
 use crate::events::{Actor, Event, Failure, FailureKind};
-use crate::state::{ExperimentState, Ids, JobState};
+use crate::state::{ExperimentState, Ids, JobState, FOLD_FINGERPRINT};
 use crate::store::Store;
 use crate::types::{canonical_json, sha256, Hash, Method};
 use crate::worker::{ItemOut, WorkerPool};
@@ -99,8 +99,36 @@ impl Runtime {
         self.interrupt.store(0, Ordering::SeqCst);
     }
 
+    /// Current state: the latest snapshot plus the events after it, or a full fold when there is
+    /// no usable snapshot. Refreshes the snapshot once SNAPSHOT_EVERY events have piled up on it.
     pub fn state(&self, exp: &str) -> Result<ExperimentState> {
-        Ok(ExperimentState::fold(self.store.load_events(exp)?))
+        const SNAPSHOT_EVERY: usize = 256;
+        let resumed = match self.store.snapshot(exp, FOLD_FINGERPRINT)? {
+            Some((seq, bytes)) => serde_json::from_slice::<ExperimentState>(&bytes).ok().map(|mut st| {
+                st.reindex();
+                (st, seq)
+            }),
+            None => None,
+        };
+        let (st, folded) = match resumed {
+            Some((st, seq)) => {
+                let tail = self.store.load_events_after(exp, seq)?;
+                let n = tail.len();
+                (st.resume(tail), n)
+            }
+            None => {
+                let all = self.store.load_events(exp)?;
+                let n = all.len();
+                (ExperimentState::fold(all), n)
+            }
+        };
+        if folded >= SNAPSHOT_EVERY {
+            // A cache write: failure (e.g. another process holding the write lock) is harmless.
+            if let Ok(bytes) = serde_json::to_vec(&st) {
+                let _ = self.store.put_snapshot(exp, st.last_seq, FOLD_FINGERPRINT, &bytes);
+            }
+        }
+        Ok(st)
     }
 
     pub fn append(&mut self, exp: &str, actor: Actor, events: Vec<Event>) -> Result<()> {
@@ -194,8 +222,13 @@ impl Runtime {
             if let Some(hit) = self.store.cache_get(&key)? {
                 let items: Vec<ItemOut> = hit
                     .items
-                    .iter()
-                    .map(|v| ItemOut { index: v["index"].as_u64().unwrap_or(0) as usize, ok: v["ok"].as_bool().unwrap_or(false), output: v["output"].clone(), error: v["error"].clone() })
+                    .into_iter()
+                    .map(|mut v| ItemOut {
+                        index: v["index"].as_u64().unwrap_or(0) as usize,
+                        ok: v["ok"].as_bool().unwrap_or(false),
+                        output: v["output"].take(),
+                        error: v["error"].take(),
+                    })
                     .collect();
                 self.append(exp, actor, vec![Event::JobCompleted {
                     job: job.clone(),
@@ -235,11 +268,10 @@ impl Runtime {
         let method = method_from(&started.hello, worker, op, &params);
         match &out.failure {
             None => {
-                let cached: Vec<Value> = out.items.iter().map(|i| json!({"index": i.index, "ok": i.ok, "output": i.output, "error": i.error})).collect();
                 let fp_now = sha256(canonical_json(&identity(&started.hello)).as_bytes());
                 let key_now = sha256(canonical_json(&json!({"worker": worker, "op": op, "params": params, "inputs": input_hashes, "identity": fp_now})).as_bytes());
                 if use_cache {
-                    self.store.cache_put(&key_now, worker, op, &job, exp, &cached, &started.hello)?;
+                    self.store.cache_put(&key_now, worker, op, &job, exp, &out.items, &started.hello)?;
                 }
                 self.append(exp, actor, vec![Event::JobCompleted {
                     job: job.clone(),

@@ -6,10 +6,11 @@
 use crate::events::{Actor, Event, EventRecord, ExperimentStatus, FailureKind, Failure, HypothesisStatus};
 use crate::search::SearchSpec;
 use crate::types::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
     pub artifact: Hash,
@@ -22,7 +23,7 @@ pub struct Candidate {
     pub observations: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Observation {
     pub id: String,
     pub candidate: String,
@@ -44,7 +45,7 @@ impl Observation {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hypothesis {
     pub id: String,
     pub statement: String,
@@ -55,7 +56,7 @@ pub struct Hypothesis {
     pub author: Actor,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobState {
     Queued,
     Running,
@@ -65,7 +66,7 @@ pub enum JobState {
     UnknownAfterCrash,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobInfo {
     pub id: String,
     pub worker: String,
@@ -77,7 +78,7 @@ pub struct JobInfo {
     pub failure: Option<Failure>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchState {
     pub spec: SearchSpec,
     pub rounds_done: u32,
@@ -86,7 +87,7 @@ pub struct SearchState {
     pub stopped: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Paper {
     pub id: String,
     pub source: String,
@@ -99,7 +100,7 @@ pub struct Paper {
     pub artifact: Hash,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub mattergen_structures: u64,
     pub chemfm_molecules: u64,
@@ -108,7 +109,7 @@ pub struct Usage {
     pub planner_calls: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub seq: u64,
     pub author: Actor,
@@ -119,7 +120,7 @@ pub struct Note {
 
 /// Next free id numbers. Commands copy this, hand out ids, and append events; the next
 /// fold sees the new events. Only one process writes an experiment at a time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Ids {
     pub candidate: u64,
     pub observation: u64,
@@ -156,11 +157,31 @@ impl Ids {
     }
 }
 
+/// FNV-1a over the source files that define how events fold into state. A snapshot written by a
+/// binary with a different fingerprint is ignored, so a change to fold logic can never be masked
+/// by a stale snapshot.
+pub const FOLD_FINGERPRINT: u64 = {
+    const SOURCES: [&[u8]; 4] =
+        [include_bytes!("state.rs"), include_bytes!("events.rs"), include_bytes!("types.rs"), include_bytes!("search.rs")];
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut f = 0;
+    while f < SOURCES.len() {
+        let src = SOURCES[f];
+        let mut i = 0;
+        while i < src.len() {
+            h = (h ^ src[i] as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            i += 1;
+        }
+        f += 1;
+    }
+    h
+};
+
 fn num(id: &str) -> u64 {
     id.trim_start_matches(|c: char| c.is_ascii_alphabetic()).parse().unwrap_or(0)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentState {
     pub name: String,
     pub objective: String,
@@ -171,7 +192,9 @@ pub struct ExperimentState {
     pub status: ExperimentStatus,
     pub status_reason: String,
     pub candidates: Vec<Candidate>,
+    #[serde(skip)]
     index: HashMap<String, usize>,
+    #[serde(skip)]
     by_artifact: HashMap<Hash, String>,
     pub observations: Vec<Observation>,
     pub hypotheses: Vec<Hypothesis>,
@@ -217,6 +240,23 @@ impl ExperimentState {
             s.apply(r);
         }
         s
+    }
+
+    /// Continue a fold from a snapshot: apply only the events recorded after it.
+    pub fn resume(mut self, records: Vec<EventRecord>) -> ExperimentState {
+        for r in records {
+            self.apply(r);
+        }
+        self
+    }
+
+    /// Rebuild the lookup tables a snapshot does not store (they are derived from `candidates`).
+    pub fn reindex(&mut self) {
+        self.index = self.candidates.iter().enumerate().map(|(i, c)| (c.id.clone(), i)).collect();
+        self.by_artifact.clear();
+        for c in &self.candidates {
+            self.by_artifact.entry(c.artifact.clone()).or_insert_with(|| c.id.clone());
+        }
     }
 
     fn apply(&mut self, r: EventRecord) {
@@ -475,5 +515,27 @@ mod bench {
         load.sort_by(f64::total_cmp);
         fold.sort_by(f64::total_cmp);
         println!("events {n}: load median {:.2} ms, fold median {:.2} ms", load[3], fold[3]);
+    }
+
+    /// Snapshot equivalence: fold(all) == resume(roundtrip(fold(prefix)), rest) at several split points.
+    #[test]
+    #[ignore]
+    fn snapshot_matches_full_fold() {
+        let dir = std::env::var("SCIENTIST_BENCH_DATA").expect("SCIENTIST_BENCH_DATA");
+        let exp = std::env::var("SCIENTIST_BENCH_EXP").expect("SCIENTIST_BENCH_EXP");
+        let store = Store::open(std::path::Path::new(&dir)).unwrap();
+        let all = store.load_events(&exp).unwrap();
+        let full = ExperimentState::fold(all.clone());
+        let want = serde_json::to_value(&full).unwrap();
+        for k in [1, all.len() / 3, all.len() / 2, all.len() - 1, all.len()] {
+            let mut snap: ExperimentState =
+                serde_json::from_slice(&serde_json::to_vec(&ExperimentState::fold(all[..k].to_vec())).unwrap()).unwrap();
+            snap.reindex();
+            let got = snap.resume(all[k..].to_vec());
+            assert_eq!(serde_json::to_value(&got).unwrap(), want, "split at {k}");
+            assert_eq!(got.index, full.index, "index at {k}");
+            assert_eq!(got.by_artifact, full.by_artifact, "by_artifact at {k}");
+        }
+        println!("snapshot == full fold at 5 split points over {} events", all.len());
     }
 }

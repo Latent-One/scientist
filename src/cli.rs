@@ -668,12 +668,13 @@ fn fmtv(v: Option<f64>, scale: f64, prec: usize) -> String {
 // ---------------------------------------------------------------- views (read-only)
 
 fn status(rt: &Runtime, exp: &str) -> Result<()> {
-    let events = rt.store.load_events(exp)?;
-    let recent: Vec<String> = events[events.len().saturating_sub(6)..]
+    let st = rt.state(exp)?;
+    let recent: Vec<String> = rt
+        .store
+        .recent_events(exp, 6)?
         .iter()
         .map(|r| format!("  {:>6} {} {:<8} {}", r.seq, clock(r.ts_ms), r.actor.as_str(), r.event.summary()))
         .collect();
-    let st = ExperimentState::fold(events);
     let (b, u) = (&st.budget, &st.usage);
     println!("EXPERIMENT {}  [{:?}]  autonomy {} ({})", st.name, st.status, st.autonomy, level_text(st.autonomy));
     if let Some((p, at)) = &st.forked_from {
